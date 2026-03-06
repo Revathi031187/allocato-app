@@ -16,7 +16,7 @@ git remote add origin https://github.com/jaison-samuel-d/teams-genie.git
 # If origin already exists and points elsewhere, use: git remote set-url origin https://github.com/jaison-samuel-d/teams-genie.git
 
 # Stage and commit (only tracked files; .env is ignored)
-git add app.py app.yaml requirements.txt README.md DEPLOY_DATABRICKS_APPS.md .gitignore
+git add app.py app.yaml requirements.txt README.md DEPLOY_DATABRICKS_APPS.md PUSH_INSTRUCTIONS.md .gitignore .databricksignore .env.example setup_git_and_push.ps1
 git status
 git commit -m "Teams Genie bot: app, Databricks Apps app.yaml, deploy doc"
 

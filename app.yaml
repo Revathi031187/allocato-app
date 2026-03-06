@@ -1,17 +1,10 @@
 # Databricks Apps runtime config.
 # See: https://learn.microsoft.com/en-us/azure/databricks/dev-tools/databricks-apps/app-runtime
 #
-# In the Apps UI, add:
-# 1. Genie space resource (key: genie-space) → provides GENIE_SPACE_ID
-# 2. Secret resources for: microsoft-app-id, microsoft-app-password
-#    (and optionally genie-token if not using app service principal for Genie)
+# Option A - App resources (recommended): In the Apps UI add resources with keys
+#   genie-space, microsoft-app-id, microsoft-app-password and use app.yaml.with-resources.
 #
-# DATABRICKS_HOST and DATABRICKS_APP_PORT are set automatically by the platform.
+# Option B - .env file: No resources needed. Put a .env file in the same folder as app.py
+#   in the workspace with GENIE_SPACE_ID, MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD.
+#   DATABRICKS_HOST and DATABRICKS_APP_PORT are set automatically by the platform.
 command: ['python', 'app.py']
-env:
-  - name: GENIE_SPACE_ID
-    valueFrom: genie-space
-  - name: MICROSOFT_APP_ID
-    valueFrom: microsoft-app-id
-  - name: MICROSOFT_APP_PASSWORD
-    valueFrom: microsoft-app-password

@@ -14,20 +14,38 @@ This app is set up to run on [Databricks Apps](https://learn.microsoft.com/en-us
 2. Choose **Custom app** (from scratch).
 3. Give it a name (e.g. `teams-genie-bot`).
 
-## 2. Add resources
+## 2. Provide configuration (choose one)
+
+### Option A – Use a `.env` file in the workspace (simplest, no resources)
+
+1. In Databricks **Workspace**, go to the folder where your app code lives (e.g. `Users/<you>/teams-genie-bot` or the path you deploy from).
+2. Create a file named **`.env`** in that folder (same folder as `app.py`).
+3. Put these three lines in `.env` (replace with your real values; no quotes needed):
+   ```
+   GENIE_SPACE_ID=<your-genie-space-id>
+   MICROSOFT_APP_ID=<your-azure-bot-app-id>
+   MICROSOFT_APP_PASSWORD=<your-azure-bot-client-secret>
+   ```
+4. Redeploy the app. The app loads these via `load_dotenv()` and no App resources are required.
+
+**Security:** Don’t commit `.env` to Git. Add it only in the workspace. If you sync from your machine, keep `.env` in `.databricksignore` and create `.env` manually in the workspace.
+
+### Option B – Use App resources (recommended for production)
 
 In the app configuration, **Add resource** for:
 
 | Resource type | Key (reference name) | Purpose |
 |---------------|----------------------|---------|
-| **Genie space** | `genie-space` | Provides `GENIE_SPACE_ID`; app uses it for natural-language queries. Grant **Can run**. |
-| **Secret** | `microsoft-app-id` | Your Azure Bot / Teams app **Application (client) ID**. |
+| **Genie space** | `genie-space` | Provides `GENIE_SPACE_ID`. Grant **Can run**. |
+| **Secret** | `microsoft-app-id` | Your Azure Bot **Application (client) ID**. |
 | **Secret** | `microsoft-app-password` | Your Azure Bot **Client secret**. |
 
-- For the Genie space: pick the space that should back the bot.
-- For the two secrets: create or pick existing [Databricks secrets](https://learn.microsoft.com/en-us/azure/databricks/security/secrets/) (e.g. in a scope) and add them as **Secret** resources with keys `microsoft-app-id` and `microsoft-app-password`.
+- **Where:** Your app → **Edit** / **Configure** → step where you manage **App resources** → **+ Add resource**.
+- **Keys must be exactly:** `genie-space`, `microsoft-app-id`, `microsoft-app-password` (lowercase, hyphens).
+- For secrets: use [Databricks secrets](https://learn.microsoft.com/en-us/azure/databricks/security/secrets/) (scope + secret key) and add each as a **Secret** resource with the key above.
+- Then use the resources-based config: rename `app.yaml.with-resources` to `app.yaml` (replace the current one), commit/sync, and redeploy.
 
-You do **not** need a `GENIE_TOKEN` secret when using the Genie space resource; the app uses the app’s **service principal** (Databricks injects `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`) to call Genie.
+You do **not** need a `GENIE_TOKEN` when using the Genie space resource; the app uses the app’s service principal to call Genie.
 
 ## 3. Deploy from a workspace folder
 

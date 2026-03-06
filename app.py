@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from aiohttp import web
@@ -11,8 +12,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tabulate import tabulate
 
-
-load_dotenv()
+# Load .env from the same directory as this script (works when CWD differs, e.g. on Databricks Apps)
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 def _get_required_env(name: str) -> str:
@@ -132,7 +133,6 @@ def get_genie_response(prompt: str) -> str:
         attachments = poll_json.get("attachments") or []
         if not attachments:
             return "Genie completed but returned no attachments."
-
         first = attachments[0] or {}
 
         # Text answer
