@@ -1,0 +1,7 @@
+aiohttp
+botbuilder-core
+botbuilder-schema
+databricks-sdk
+python-dotenv
+requests
+tabulate

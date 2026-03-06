@@ -1,0 +1,10 @@
+# Do not sync these to Databricks workspace
+.venv/
+venv/
+.env
+__pycache__/
+*.pyc
+.git/
+.idea/
+.vscode/
+*.log
