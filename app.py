@@ -208,6 +208,7 @@ bot = TeamsGenieBot()
 
 
 async def messages(req: web.Request) -> web.Response:
+    print(f"[{datetime.utcnow().isoformat()}] Received POST /api/messages")
     body = await req.json()
     activity = Activity().deserialize(body)
     auth_header = req.headers.get("Authorization", "")
@@ -217,6 +218,7 @@ async def messages(req: web.Request) -> web.Response:
 
     try:
         await adapter.process_activity(activity, auth_header, aux)
+        print(f"[{datetime.utcnow().isoformat()}] Reply sent successfully")
         return web.Response(status=201)
     except Exception as err:
         print(f"Bot error processing activity: {err}")
@@ -234,4 +236,5 @@ if __name__ == "__main__":
     port = int(
         (os.environ.get("DATABRICKS_APP_PORT") or os.environ.get("PORT") or "3978").strip()
     )
+    print(f"Bot starting: POST /api/messages on port {port}")
     web.run_app(create_app(), host="0.0.0.0", port=port)
