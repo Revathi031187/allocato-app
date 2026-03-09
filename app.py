@@ -225,16 +225,30 @@ async def messages(req: web.Request) -> web.Response:
         return web.Response(status=500, text=str(err))
 
 
+async def health(_req: web.Request) -> web.Response:
+    """GET / for health checks and to avoid 404 when opening the root URL."""
+    return web.Response(text="Bot is running. POST to /api/messages for the Teams webhook.", status=200)
+
+
 def create_app() -> web.Application:
     app = web.Application()
+    app.router.add_get("/", health)
     app.router.add_post("/api/messages", messages)
     return app
 
 
 if __name__ == "__main__":
-    # Databricks Apps set DATABRICKS_APP_PORT; otherwise use PORT or default 3978
-    port = int(
-        (os.environ.get("DATABRICKS_APP_PORT") or os.environ.get("PORT") or "3978").strip()
-    )
-    print(f"Bot starting: POST /api/messages on port {port}")
-    web.run_app(create_app(), host="0.0.0.0", port=port)
+    import sys
+    print("Starting teams-genie-bot...", flush=True)
+    try:
+        # Databricks Apps set DATABRICKS_APP_PORT; otherwise use PORT or default 3978
+        port = int(
+            (os.environ.get("DATABRICKS_APP_PORT") or os.environ.get("PORT") or "3978").strip()
+        )
+        print(f"Bot starting: POST /api/messages on port {port}", flush=True)
+        web.run_app(create_app(), host="0.0.0.0", port=port)
+    except Exception as e:
+        import traceback
+        print(f"Failed to start: {e}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
