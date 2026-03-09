@@ -201,8 +201,13 @@ class TeamsGenieBot(ActivityHandler):
 
 MICROSOFT_APP_ID = (os.environ.get("MICROSOFT_APP_ID") or "").strip()
 MICROSOFT_APP_PASSWORD = (os.environ.get("MICROSOFT_APP_PASSWORD") or "").strip()
+# Required for single-tenant app: SDK must request token from your tenant, not "Bot Framework"
+MICROSOFT_APP_TENANT_ID = (os.environ.get("MICROSOFT_APP_TENANT_ID") or "").strip()
 
-adapter_settings = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD)
+_adapter_kw: dict = {}
+if MICROSOFT_APP_TENANT_ID:
+    _adapter_kw["channel_auth_tenant"] = MICROSOFT_APP_TENANT_ID
+adapter_settings = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD, **_adapter_kw)
 adapter = BotFrameworkAdapter(adapter_settings)
 bot = TeamsGenieBot()
 
@@ -230,6 +235,27 @@ async def health(_req: web.Request) -> web.Response:
     return web.Response(text="Bot is running. POST to /api/messages for the Teams webhook.", status=200)
 
 
+def _cors_headers() -> dict:
+    """CORS headers so Web Chat (browser) can POST to /api/messages."""
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Max-Age": "3600",
+    }
+
+
+@web.middleware
+async def cors_middleware(request: web.Request, handler):
+    """Handle CORS preflight (OPTIONS) and add CORS headers to responses."""
+    if request.method == "OPTIONS":
+        return web.Response(status=200, headers=_cors_headers())
+    resp = await handler(request)
+    for k, v in _cors_headers().items():
+        resp.headers[k] = v
+    return resp
+
+
 @web.middleware
 async def log_all_requests(request: web.Request, handler):
     """Log every request as soon as it hits the server (before auth or body parsing)."""
@@ -238,7 +264,7 @@ async def log_all_requests(request: web.Request, handler):
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[log_all_requests])
+    app = web.Application(middlewares=[cors_middleware, log_all_requests])
     app.router.add_get("/", health)
     app.router.add_post("/api/messages", messages)
     return app
