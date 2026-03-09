@@ -208,7 +208,7 @@ bot = TeamsGenieBot()
 
 
 async def messages(req: web.Request) -> web.Response:
-    print(f"[{datetime.utcnow().isoformat()}] Received POST /api/messages")
+    print(f"[{datetime.utcnow().isoformat()}] Received POST /api/messages", flush=True)
     body = await req.json()
     activity = Activity().deserialize(body)
     auth_header = req.headers.get("Authorization", "")
@@ -230,8 +230,15 @@ async def health(_req: web.Request) -> web.Response:
     return web.Response(text="Bot is running. POST to /api/messages for the Teams webhook.", status=200)
 
 
+@web.middleware
+async def log_all_requests(request: web.Request, handler):
+    """Log every request as soon as it hits the server (before auth or body parsing)."""
+    print(f"[{datetime.utcnow().isoformat()}] INCOMING: {request.method} {request.path}", flush=True)
+    return await handler(request)
+
+
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[log_all_requests])
     app.router.add_get("/", health)
     app.router.add_post("/api/messages", messages)
     return app
