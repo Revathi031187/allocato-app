@@ -34,40 +34,81 @@ def _get_required_env(name: str) -> str:
 
 
 def _normalize_genie_result(cols: list, data_array: list) -> tuple[list, list[list]]:
-    """Normalize Genie query result: handle missing schema, first-row headers, or column count mismatch."""
+    """Normalize Genie query result: handle row/column orientation, manifest fallbacks, first-row headers."""
     if not data_array:
         return (cols or [], [])
-    rows = [list(r) if isinstance(r, (list, tuple)) else [r] for r in data_array]
-    first_row = rows[0] if rows else []
+    # Coerce to list of lists
+    rows = []
+    for r in data_array:
+        if isinstance(r, (list, tuple)):
+            rows.append([x for x in r])
+        else:
+            rows.append([r])
+    if not rows:
+        return (cols or [], [])
+    first_row = rows[0]
     num_cells = len(first_row)
-    cols_ok = cols and num_cells > 0 and not all(len(str(c).strip()) <= 1 for c in cols) and num_cells == len(cols)
-    if cols_ok:
-        return (cols, rows)
-    # No usable columns or count mismatch: use first row as headers only if we have more than one row
-    if num_cells > 0 and len(rows) > 1:
+    # Detect column-oriented: every row has exactly 1 cell and we have many rows -> transpose
+    if num_cells == 1 and len(rows) > 1 and (not cols or len(cols) != len(rows)):
+        # Treat each row as one column; transpose to [row0, row1, ...] where row_i = [col0_i, col1_i, ...]
+        ncols = len(rows)
+        nrows = 1
+        transposed = [[rows[j][0] for j in range(ncols)]]
+        headers = cols if cols and len(cols) == ncols else [f"Col{i}" for i in range(ncols)]
+        return (headers, transposed)
+    # Use first row as headers when we have 2+ rows and first row looks like headers (all string, no numbers)
+    def _looks_like_header(cell) -> bool:
+        s = str(cell).strip()
+        if not s:
+            return True
+        try:
+            float(s)
+            return False
+        except (TypeError, ValueError):
+            return True
+    if num_cells > 0 and len(rows) >= 2 and all(_looks_like_header(first_row[i]) for i in range(min(num_cells, len(first_row)))):
         headers = [str(first_row[i]) if i < len(first_row) else f"Col{i}" for i in range(num_cells)]
         return (headers, rows[1:])
-    # Single row: use Col0, Col1, ... if we don't have matching columns
+    # Manifest columns: ensure we have a list of strings (no single long string treated as list of chars)
+    if cols and isinstance(cols, list) and len(cols) == num_cells:
+        clean_cols = [str(c).strip() if c is not None else "" for c in cols]
+        if clean_cols and len(clean_cols[0]) > 1:  # sensible names
+            return (clean_cols, rows)
+    # Single row, many columns (e.g. summary stats): use Col0..ColN or manifest if count matches
     if num_cells > 0:
         headers = cols if cols and len(cols) == num_cells else [f"Col{i}" for i in range(num_cells)]
         return (headers, rows)
     return (cols or [], rows)
 
 
+def _format_cell(val) -> str:
+    """Format one cell for markdown table: round numbers, escape pipes."""
+    if val is None:
+        return ""
+    s = str(val).replace("|", "\\|").replace("\n", " ").strip()
+    try:
+        f = float(s)
+        if abs(f) >= 1e6 or (abs(f) < 0.01 and f != 0):
+            return f"{f:.2e}"
+        return f"{f:.2f}" if isinstance(val, (int, float)) or (isinstance(s, str) and s.replace(".", "").replace("-", "").isdigit()) else s[:200]
+    except (TypeError, ValueError):
+        return s[:200]
+
+
 def _format_markdown_table(headers: list, rows: list[list]) -> str:
     """Format headers and rows as a markdown table (like Genie / Teams)."""
     if not headers or not rows:
         return ""
-    # Escape pipe in cell content so it doesn't break the table
-    def cell(s):
-        s = str(s).replace("|", "\\|").replace("\n", " ").strip() if s is not None else ""
-        return s[:200]  # limit cell width for readability
-    h = [cell(h) for h in headers]
+    def cell(s, is_header: bool = False):
+        if is_header:
+            return (str(s).replace("|", "\\|").replace("\n", " ").strip() if s is not None else "")[:80]
+        return _format_cell(s)
+    h = [cell(h, True) for h in headers]
     header_line = "| " + " | ".join(h) + " |"
     sep_line = "| " + " | ".join(["---"] * len(h)) + " |"
     body_lines = []
     for row in rows:
-        cells = [cell(row[i]) if i < len(row) else "" for i in range(len(headers))]
+        cells = [cell(row[i] if i < len(row) else "") for i in range(len(headers))]
         body_lines.append("| " + " | ".join(cells) + " |")
     return header_line + "\n" + sep_line + "\n" + "\n".join(body_lines)
 
@@ -104,8 +145,8 @@ def _suggest_chart_type_gemini(cols: list[str], sample_row: list) -> str:
 
 
 def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> bytes | None:
-    """Generate a PNG chart from query result. Returns None if generation fails."""
-    if len(cols) < 2 or not rows:
+    """Generate a PNG chart from query result. Handles multi-row (first col = labels, second = values) and single-row summary (many columns)."""
+    if not cols or not rows:
         return None
     try:
         import matplotlib
@@ -113,26 +154,39 @@ def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> 
         import matplotlib.pyplot as plt
     except ImportError:
         return None
-    # Use first column as labels, second as values (or first numeric column as values)
     labels = []
     values = []
-    for row in rows[:30]:  # limit for chart readability
-        lbl = row[0] if row else ""
-        try:
-            val = float(row[1]) if len(row) > 1 else 0
-        except (TypeError, ValueError):
-            val = 0
-        labels.append(str(lbl)[:30])
-        values.append(val)
+    # Single row with many columns (e.g. summary stats): use column names as labels, row values as data
+    if len(rows) == 1 and len(rows[0]) > 1:
+        row = rows[0]
+        for i in range(min(len(cols), len(row), 20)):  # cap at 20 for readability
+            try:
+                v = float(row[i])
+                labels.append((cols[i] or f"Col{i}")[:25])
+                values.append(v)
+            except (TypeError, ValueError):
+                pass
+    else:
+        # Multi-row: first column = labels, second (or first numeric) = values
+        for row in rows[:25]:
+            if not row:
+                continue
+            lbl = row[0] if row else ""
+            try:
+                val = float(row[1]) if len(row) > 1 else 0
+            except (TypeError, ValueError):
+                val = 0
+            labels.append(str(lbl)[:30])
+            values.append(val)
     if not values:
         return None
     chart_type = "bar"
-    if (os.environ.get("GEMINI_API_KEY") or "").strip():
+    if (os.environ.get("GEMINI_API_KEY") or "").strip() and rows:
         chart_type = _suggest_chart_type_gemini(cols, rows[0] if rows else [])
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, max(4, len(labels) * 0.25)))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
-    if chart_type == "pie":
+    if chart_type == "pie" and len(values) <= 12:
         ax.pie(values, labels=labels, autopct="%1.0f%%", startangle=90)
         ax.axis("equal")
     elif chart_type == "line":
@@ -141,10 +195,18 @@ def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> 
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_ylabel(cols[1] if len(cols) > 1 else "Value")
     else:
-        ax.bar(range(len(values)), values, color="steelblue", edgecolor="white")
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_ylabel(cols[1] if len(cols) > 1 else "Value")
+        # Bar: horizontal if many labels (summary stats), vertical otherwise
+        if len(labels) > 6:
+            y_pos = range(len(labels))
+            ax.barh(y_pos, values, color="steelblue", edgecolor="white")
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.set_xlabel("Value")
+        else:
+            ax.bar(range(len(values)), values, color="steelblue", edgecolor="white")
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, rotation=45, ha="right")
+            ax.set_ylabel(cols[1] if len(cols) > 1 else "Value")
     ax.set_title((description or "Result")[:80])
     plt.tight_layout()
     buf = io.BytesIO()
@@ -331,7 +393,7 @@ def get_genie_response(prompt: str) -> dict:
 
             result_url = (
                 f"{host}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
-                f"/query-result/{attachment_id}"
+                f"/attachments/{attachment_id}/query-result"
             )
             result_resp = session.get(result_url, headers=headers)
             if result_resp.status_code != 200:
@@ -342,11 +404,23 @@ def get_genie_response(prompt: str) -> dict:
             result_obj = (statement_response.get("result") or {})
             data_array = result_obj.get("data_array") or []
 
+            # Extract column names: manifest.schema.columns[].name (or .column_name); fallback first row
             manifest = statement_response.get("manifest") or {}
-            cols_info = ((manifest.get("schema") or {}).get("columns") or [])
-            cols = [((c or {}).get("name") or "").strip() for c in cols_info]
+            schema = manifest.get("schema") or {}
+            cols_info = schema.get("columns") or []
+            cols = []
+            for c in cols_info:
+                if isinstance(c, dict):
+                    cols.append((c.get("name") or c.get("column_name") or "").strip())
+                elif hasattr(c, "name"):
+                    cols.append(str(getattr(c, "name", "") or "").strip())
+                else:
+                    cols.append("")
+            # Only use first row as column names when manifest is empty and we have 2+ rows (first = header)
+            if not cols and data_array and len(data_array) >= 2 and isinstance(data_array[0], (list, tuple)):
+                first = data_array[0]
+                cols = [str(first[i])[:80] if i < len(first) else f"Col{i}" for i in range(len(first))]
 
-            # Normalize: Genie may return row-oriented or column-oriented data; or headers in first row
             cols, rows = _normalize_genie_result(cols, data_array)
             if not cols or not rows:
                 return {"text": header + "_No data returned._", "chart_bytes": None}
