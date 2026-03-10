@@ -183,7 +183,8 @@ def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> 
     chart_type = "bar"
     if (os.environ.get("GEMINI_API_KEY") or "").strip() and rows:
         chart_type = _suggest_chart_type_gemini(cols, rows[0] if rows else [])
-    fig, ax = plt.subplots(figsize=(8, max(4, len(labels) * 0.25)))
+    # Larger figure so the chart displays at a readable size in Teams (was 8x4)
+    fig, ax = plt.subplots(figsize=(12, max(6, len(labels) * 0.35)))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
     if chart_type == "pie" and len(values) <= 12:
@@ -210,7 +211,8 @@ def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> 
     ax.set_title((description or "Result")[:80])
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    # Higher DPI so chart is sharp and displays larger in Teams
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
@@ -454,11 +456,12 @@ class TeamsGenieBot(ActivityHandler):
             if len(chart_bytes) <= MAX_INLINE_BYTES:
                 b64 = __import__("base64").b64encode(chart_bytes).decode("ascii")
                 data_url = f"data:image/png;base64,{b64}"
+                # Use stretch + explicit width so the chart displays large in Teams (not a tiny thumbnail)
                 card = {
                     "type": "AdaptiveCard",
                     "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                     "version": "1.4",
-                    "body": [{"type": "Image", "url": data_url, "size": "large"}],
+                    "body": [{"type": "Image", "url": data_url, "size": "stretch", "width": "600px"}],
                 }
                 attachments.append(Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card))
             elif base_url:
