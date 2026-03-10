@@ -70,6 +70,63 @@ Azure must run `python app.py` (your app listens on the port Azure provides).
 
 ---
 
+## Changing the Genie space (workspace or space ID)
+
+When you switch to a different Databricks workspace or a different Genie space (e.g. "Allocato (B2B) Preview"), update the app’s configuration so the bot uses the new space.
+
+### 1. Get the values from the Genie URL
+
+When you’re in the Genie space in the browser, the URL looks like:
+
+```
+https://adb-2376768479807879.19.azuredatabricks.net/genie/rooms/01f08ef6f18e19a98cd90b18989b8de7/chats/...
+```
+
+| What | Where in the URL | Example |
+|------|------------------|--------|
+| **Workspace host** | The origin (scheme + hostname), no path, no trailing slash | `https://adb-2376768479807879.19.azuredatabricks.net` |
+| **Genie Space ID** | The segment right after `/genie/rooms/` (long hex string) | `01f08ef6f18e19a98cd90b18989b8de7` |
+
+Copy these two values; you’ll set them in the app.
+
+### 2. Update the deployed app (Azure App Service)
+
+1. In **Azure Portal**, open your **Web App** (the one running the bot).
+2. Go to **Settings** → **Configuration** → **Application settings**.
+3. Change (or add):
+   - **`DATABRICKS_HOST`** = your workspace host, e.g.  
+     `https://adb-2376768479807879.19.azuredatabricks.net`
+   - **`GENIE_SPACE_ID`** = your Genie space ID, e.g.  
+     `01f08ef6f18e19a98cd90b18989b8de7`
+4. Click **Save** at the top. Restart the Web App (**Overview** → **Restart**) so the new values are picked up.
+
+The bot will now use this workspace and Genie space for all new conversations.
+
+### 3. Update local / .env (for local runs)
+
+In your project folder, edit **`.env`** (or copy from `.env.example`):
+
+```
+DATABRICKS_HOST=https://adb-2376768479807879.19.azuredatabricks.net
+GENIE_SPACE_ID=01f08ef6f18e19a98cd90b18989b8de7
+GENIE_TOKEN=<your PAT for this workspace>
+```
+
+Use a **GENIE_TOKEN** (PAT) that has access to this workspace and the Genie space. Save the file and restart `python app.py` if it’s running.
+
+### 4. Quick reference for your current space
+
+For the Allocato (B2B) Preview space in your URL:
+
+| Setting | Value |
+|--------|--------|
+| `DATABRICKS_HOST` | `https://adb-2376768479807879.19.azuredatabricks.net` |
+| `GENIE_SPACE_ID` | `01f08ef6f18e19a98cd90b18989b8de7` |
+
+After changing these, the bot will query this Genie space when users send messages in Teams.
+
+---
+
 ## Step 4: Deploy your code
 
 **No GitHub write permission or identity?** Use **Option B (zip deploy)** or **Option C (VS Code)**. They do not need Deployment Center, GitHub Actions, or a managed identity.
@@ -185,6 +242,15 @@ Your app only has `POST /api/messages`. Browsers and some monitors use `GET /`. 
 | “Missing required env var” | Re-check **Configuration** → **Application settings**; all five vars above must be set. |
 | App doesn’t start | Confirm **Startup Command** is `python app.py` and that `app.py` and `requirements.txt` are in the deployed root. |
 | Genie errors | Verify `GENIE_TOKEN` and `GENIE_SPACE_ID`; token must have access to the Genie space and its data. |
+| **Result looks garbled (wrong table)** | The app now normalizes Genie result shape. Redeploy the latest `app.py`. If it still happens, check **Log stream** for errors when the query runs. |
+| **Chart image not returned in Teams** | See **"Chart image not showing in Teams"** below. |
+
+### Chart image not showing in Teams
+
+1. **BOT_PUBLIC_URL** must be set in **Application settings** to your Web App URL, e.g. `https://teams-genie-bot.azurewebsites.net` (no trailing slash). Without it, the bot does not add the chart attachment.
+2. **Restart** the Web App after adding or changing **BOT_PUBLIC_URL**.
+3. **Teams app manifest:** If you use a custom manifest, add your Web App host to **validDomains**, e.g. `"validDomains": ["*.azurewebsites.net"]` or `["teams-genie-bot.azurewebsites.net"]`, so Teams can load the chart image from the bot’s URL.
+4. **Redeploy** so the latest code (chart generation and attachment logic) is running.
 
 ### "Site can't be reached" (browser or bot gets no response)
 

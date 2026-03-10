@@ -36,7 +36,7 @@
       "supportsFiles": true
     }
   ],
-  "validDomains": [],
+  "validDomains": ["*.azurewebsites.net"],
   "webApplicationInfo": {
     "id": "c227e509-5774-44e1-b76b-12669d5914fc"
   }

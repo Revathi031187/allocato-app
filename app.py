@@ -33,6 +33,27 @@ def _get_required_env(name: str) -> str:
     return v
 
 
+def _normalize_genie_result(cols: list, data_array: list) -> tuple[list, list[list]]:
+    """Normalize Genie query result: handle missing schema, first-row headers, or column count mismatch."""
+    if not data_array:
+        return (cols or [], [])
+    rows = [list(r) if isinstance(r, (list, tuple)) else [r] for r in data_array]
+    first_row = rows[0] if rows else []
+    num_cells = len(first_row)
+    cols_ok = cols and num_cells > 0 and not all(len(str(c).strip()) <= 1 for c in cols) and num_cells == len(cols)
+    if cols_ok:
+        return (cols, rows)
+    # No usable columns or count mismatch: use first row as headers only if we have more than one row
+    if num_cells > 0 and len(rows) > 1:
+        headers = [str(first_row[i]) if i < len(first_row) else f"Col{i}" for i in range(num_cells)]
+        return (headers, rows[1:])
+    # Single row: use Col0, Col1, ... if we don't have matching columns
+    if num_cells > 0:
+        headers = cols if cols and len(cols) == num_cells else [f"Col{i}" for i in range(num_cells)]
+        return (headers, rows)
+    return (cols or [], rows)
+
+
 def _format_markdown_table(headers: list, rows: list[list]) -> str:
     """Format headers and rows as a markdown table (like Genie / Teams)."""
     if not headers or not rows:
@@ -203,13 +224,23 @@ def _genie_via_sdk(space_id: str, prompt: str) -> dict:
                 return {"text": header + f"Query result fetch failed: {e}", "chart_bytes": None}
             stmt = getattr(result, "statement_response", None)
             res = getattr(stmt, "result", None) if stmt else None
-            rows = getattr(res, "data_array", None) or []
+            data_array = getattr(res, "data_array", None) or []
+            # Convert to list of lists (SDK may return row objects)
+            rows_raw = []
+            for r in data_array:
+                if isinstance(r, (list, tuple)):
+                    rows_raw.append(list(r))
+                elif hasattr(r, "__iter__") and not isinstance(r, (str, dict)):
+                    rows_raw.append(list(r))
+                else:
+                    rows_raw.append([r])
             manifest = getattr(stmt, "manifest", None) if stmt else None
             schema = getattr(manifest, "schema", None) if manifest else None
             cols = []
             if schema:
                 for c in getattr(schema, "columns", None) or []:
-                    cols.append(getattr(c, "name", ""))
+                    cols.append(str(getattr(c, "name", "") or ""))
+            cols, rows = _normalize_genie_result(cols, rows_raw)
             if cols and rows:
                 table_md = _format_markdown_table([str(c).upper() for c in cols], rows)
                 chart_bytes = _generate_chart_png(cols, rows, desc)
@@ -309,16 +340,18 @@ def get_genie_response(prompt: str) -> dict:
             result_json = result_resp.json()
             statement_response = result_json.get("statement_response") or {}
             result_obj = (statement_response.get("result") or {})
-            rows = result_obj.get("data_array") or []
+            data_array = result_obj.get("data_array") or []
 
             manifest = statement_response.get("manifest") or {}
             cols_info = ((manifest.get("schema") or {}).get("columns") or [])
-            cols = [((c or {}).get("name") or "") for c in cols_info]
+            cols = [((c or {}).get("name") or "").strip() for c in cols_info]
 
+            # Normalize: Genie may return row-oriented or column-oriented data; or headers in first row
+            cols, rows = _normalize_genie_result(cols, data_array)
             if not cols or not rows:
                 return {"text": header + "_No data returned._", "chart_bytes": None}
 
-            table_md = _format_markdown_table([c.upper() for c in cols], rows)
+            table_md = _format_markdown_table([(c or "").upper() for c in cols], rows)
             chart_bytes = _generate_chart_png(cols, rows, description)
             return {"text": header + "\n\n" + table_md, "chart_bytes": chart_bytes}
 
