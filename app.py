@@ -385,6 +385,9 @@ def get_genie_response(prompt: str) -> dict:
             header = ""
             if description:
                 header += f"{description}\n\n"
+            else:
+                # Always show a short summary line so the user sees explanatory text (e.g. for "give me summary")
+                header += "Here are the results from your query.\n\n"
             if sql_stmt:
                 header += f"```sql\n{sql_stmt}\n```\n\n"
 
@@ -445,8 +448,20 @@ class TeamsGenieBot(ActivityHandler):
         chart_bytes = result.get("chart_bytes")
         attachments = []
         if chart_bytes:
+            # Prefer Adaptive Card with base64 image so Teams shows the chart without fetching a URL (avoids 404 with multiple instances)
+            MAX_INLINE_BYTES = 280_000  # ~280KB; base64 adds ~33%
             base_url = (os.environ.get("BOT_PUBLIC_URL") or "").strip().rstrip("/")
-            if base_url:
+            if len(chart_bytes) <= MAX_INLINE_BYTES:
+                b64 = __import__("base64").b64encode(chart_bytes).decode("ascii")
+                data_url = f"data:image/png;base64,{b64}"
+                card = {
+                    "type": "AdaptiveCard",
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.4",
+                    "body": [{"type": "Image", "url": data_url, "size": "large"}],
+                }
+                attachments.append(Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card))
+            elif base_url:
                 cid = _chart_store(chart_bytes)
                 chart_url = f"{base_url}/api/chart/{cid}"
                 attachments.append(Attachment(content_type="image/png", content_url=chart_url, name="chart.png"))
