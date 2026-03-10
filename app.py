@@ -1,16 +1,26 @@
+import io
 import os
+import re
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from aiohttp import web
 from botbuilder.core import ActivityHandler, BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
-from botbuilder.schema import Activity, ActivityTypes
+from botbuilder.schema import Activity, ActivityTypes, Attachment
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from tabulate import tabulate
+
+# Optional: custom credentials for single-tenant to avoid "Unable to get authority configuration"
+try:
+    from botframework.connector.auth import AppCredentials
+except ImportError:
+    AppCredentials = None
 
 # Load .env from the same directory as this script (works when CWD differs, e.g. on Databricks Apps)
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -23,21 +33,152 @@ def _get_required_env(name: str) -> str:
     return v
 
 
-def _genie_via_sdk(space_id: str, prompt: str) -> str:
-    """Use Databricks SDK when running in Databricks Apps (service principal auth)."""
+def _format_markdown_table(headers: list, rows: list[list]) -> str:
+    """Format headers and rows as a markdown table (like Genie / Teams)."""
+    if not headers or not rows:
+        return ""
+    # Escape pipe in cell content so it doesn't break the table
+    def cell(s):
+        s = str(s).replace("|", "\\|").replace("\n", " ").strip() if s is not None else ""
+        return s[:200]  # limit cell width for readability
+    h = [cell(h) for h in headers]
+    header_line = "| " + " | ".join(h) + " |"
+    sep_line = "| " + " | ".join(["---"] * len(h)) + " |"
+    body_lines = []
+    for row in rows:
+        cells = [cell(row[i]) if i < len(row) else "" for i in range(len(headers))]
+        body_lines.append("| " + " | ".join(cells) + " |")
+    return header_line + "\n" + sep_line + "\n" + "\n".join(body_lines)
+
+
+def _suggest_chart_type_gemini(cols: list[str], sample_row: list) -> str:
+    """Use Gemini to suggest chart type: bar, line, or pie. Returns 'bar' on error or if no key."""
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return "bar"
+    try:
+        # Gemini API: generateContent with a short prompt
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": (
+                        f"Column names: {cols}. Sample row: {sample_row}. "
+                        "Reply with exactly one word: bar, line, or pie. "
+                        "Use bar for categories vs values, line for time series, pie for proportions."
+                    )
+                }]
+            }],
+            "generationConfig": {"maxOutputTokens": 10}
+        }
+        r = requests.post(f"{url}?key={api_key}", json=payload, timeout=10)
+        if r.status_code != 200:
+            return "bar"
+        data = r.json()
+        text = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "bar") or "bar"
+        word = re.search(r"\b(bar|line|pie)\b", text.lower())
+        return word.group(1) if word else "bar"
+    except Exception:
+        return "bar"
+
+
+def _generate_chart_png(cols: list[str], rows: list[list], description: str) -> bytes | None:
+    """Generate a PNG chart from query result. Returns None if generation fails."""
+    if len(cols) < 2 or not rows:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+    # Use first column as labels, second as values (or first numeric column as values)
+    labels = []
+    values = []
+    for row in rows[:30]:  # limit for chart readability
+        lbl = row[0] if row else ""
+        try:
+            val = float(row[1]) if len(row) > 1 else 0
+        except (TypeError, ValueError):
+            val = 0
+        labels.append(str(lbl)[:30])
+        values.append(val)
+    if not values:
+        return None
+    chart_type = "bar"
+    if (os.environ.get("GEMINI_API_KEY") or "").strip():
+        chart_type = _suggest_chart_type_gemini(cols, rows[0] if rows else [])
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+    if chart_type == "pie":
+        ax.pie(values, labels=labels, autopct="%1.0f%%", startangle=90)
+        ax.axis("equal")
+    elif chart_type == "line":
+        ax.plot(range(len(values)), values, marker="o")
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylabel(cols[1] if len(cols) > 1 else "Value")
+    else:
+        ax.bar(range(len(values)), values, color="steelblue", edgecolor="white")
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylabel(cols[1] if len(cols) > 1 else "Value")
+    ax.set_title((description or "Result")[:80])
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+# In-memory chart cache for attachment URLs: id -> (bytes, timestamp)
+_chart_cache: dict[str, tuple[bytes, float]] = {}
+_chart_cache_lock = threading.Lock()
+_CHART_CACHE_MAX_AGE_SEC = 600
+
+
+def _chart_store(png_bytes: bytes) -> str:
+    """Store chart bytes and return a unique ID."""
+    cid = str(uuid.uuid4())
+    with _chart_cache_lock:
+        now = time.time()
+        # Evict old entries
+        for k in list(_chart_cache):
+            if now - _chart_cache[k][1] > _CHART_CACHE_MAX_AGE_SEC:
+                del _chart_cache[k]
+        _chart_cache[cid] = (png_bytes, now)
+    return cid
+
+
+def _chart_get(cid: str) -> bytes | None:
+    """Retrieve chart bytes by ID; returns None if missing or expired."""
+    with _chart_cache_lock:
+        if cid not in _chart_cache:
+            return None
+        data, ts = _chart_cache[cid]
+        if time.time() - ts > _CHART_CACHE_MAX_AGE_SEC:
+            del _chart_cache[cid]
+            return None
+        return data
+
+
+def _genie_via_sdk(space_id: str, prompt: str) -> dict:
+    """Use Databricks SDK when running in Databricks Apps (service principal auth). Returns dict with 'text' and optional 'chart_bytes'."""
     try:
         from databricks.sdk import WorkspaceClient
     except ImportError:
-        return "Genie SDK not available (install databricks-sdk)."
+        return {"text": "Genie SDK not available (install databricks-sdk).", "chart_bytes": None}
     w = WorkspaceClient()
     response = w.genie.start_conversation_and_wait(space_id=space_id, content=prompt)
     if not response.attachments:
-        return "Genie completed but returned no attachments."
+        return {"text": "Genie completed but returned no attachments.", "chart_bytes": None}
     first = response.attachments[0]
     if getattr(first, "text", None) and getattr(first.text, "content", None):
         out = (first.text.content or "").strip()
         if out:
-            return out
+            return {"text": out, "chart_bytes": None}
     if getattr(first, "query", None):
         q = first.query
         desc = (getattr(q, "description", None) or "").strip()
@@ -59,7 +200,7 @@ def _genie_via_sdk(space_id: str, prompt: str) -> str:
                     attachment_id=att_id,
                 )
             except Exception as e:
-                return header + f"Query result fetch failed: {e}"
+                return {"text": header + f"Query result fetch failed: {e}", "chart_bytes": None}
             stmt = getattr(result, "statement_response", None)
             res = getattr(stmt, "result", None) if stmt else None
             rows = getattr(res, "data_array", None) or []
@@ -70,19 +211,20 @@ def _genie_via_sdk(space_id: str, prompt: str) -> str:
                 for c in getattr(schema, "columns", None) or []:
                     cols.append(getattr(c, "name", ""))
             if cols and rows:
-                table = tabulate(rows, headers=[str(c).upper() for c in cols], tablefmt="fancy_grid")
-                return header + f"```text\n{table}\n```"
-        return header + "_No data returned._" if not header else header.rstrip()
-    return "Genie returned an unsupported attachment type."
+                table_md = _format_markdown_table([str(c).upper() for c in cols], rows)
+                chart_bytes = _generate_chart_png(cols, rows, desc)
+                return {"text": header + "\n\n" + table_md, "chart_bytes": chart_bytes}
+        return {"text": header + "_No data returned._" if not header else header.rstrip(), "chart_bytes": None}
+    return {"text": "Genie returned an unsupported attachment type.", "chart_bytes": None}
 
 
-def get_genie_response(prompt: str) -> str:
-    """Calls Databricks Genie (REST API or SDK) and returns markdown-friendly text."""
+def get_genie_response(prompt: str) -> dict:
+    """Calls Databricks Genie (REST API or SDK). Returns dict with 'text' and optional 'chart_bytes'."""
     space_id = _get_required_env("GENIE_SPACE_ID")
 
     prompt = (prompt or "").strip()
     if not prompt:
-        return "Ask a question about your dataset (e.g. “Top 5 categories by revenue”)."
+        return {"text": "Ask a question about your dataset (e.g. \"Top 5 categories by revenue\").", "chart_bytes": None}
 
     print(f"[{datetime.utcnow().isoformat()}] Genie prompt: {prompt!r}")
 
@@ -110,20 +252,20 @@ def get_genie_response(prompt: str) -> str:
     start_url = f"{host}/api/2.0/genie/spaces/{space_id}/start-conversation"
     start_resp = session.post(start_url, headers=headers, json={"content": prompt})
     if start_resp.status_code != 200:
-        return f"Genie API error: {start_resp.status_code} - {start_resp.text}"
+        return {"text": f"Genie API error: {start_resp.status_code} - {start_resp.text}", "chart_bytes": None}
 
     start_json = start_resp.json()
     conversation_id = (start_json.get("conversation") or {}).get("id")
     message_id = (start_json.get("message") or {}).get("id")
     if not conversation_id or not message_id:
-        return f"Genie: missing conversation/message id. Raw response: {start_json}"
+        return {"text": f"Genie: missing conversation/message id. Raw response: {start_json}", "chart_bytes": None}
 
     # Step 2: Poll for completion
     for _ in range(100):
         poll_url = f"{host}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
         poll_resp = session.get(poll_url, headers=headers)
         if poll_resp.status_code != 200:
-            return f"Polling error: {poll_resp.status_code} - {poll_resp.text}"
+            return {"text": f"Polling error: {poll_resp.status_code} - {poll_resp.text}", "chart_bytes": None}
 
         poll_json = poll_resp.json()
         if poll_json.get("status") != "COMPLETED":
@@ -132,12 +274,13 @@ def get_genie_response(prompt: str) -> str:
 
         attachments = poll_json.get("attachments") or []
         if not attachments:
-            return "Genie completed but returned no attachments."
+            return {"text": "Genie completed but returned no attachments.", "chart_bytes": None}
         first = attachments[0] or {}
 
         # Text answer
         if "text" in first and isinstance(first["text"], dict):
-            return (first["text"].get("content") or "").strip() or "Genie returned an empty text answer."
+            text = (first["text"].get("content") or "").strip() or "Genie returned an empty text answer."
+            return {"text": text, "chart_bytes": None}
 
         # Query answer (SQL + result table)
         if "query" in first and isinstance(first["query"], dict):
@@ -153,7 +296,7 @@ def get_genie_response(prompt: str) -> str:
                 header += f"```sql\n{sql_stmt}\n```\n\n"
 
             if not attachment_id:
-                return header + "Genie returned SQL but no attachment_id to fetch results."
+                return {"text": header + "Genie returned SQL but no attachment_id to fetch results.", "chart_bytes": None}
 
             result_url = (
                 f"{host}/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
@@ -161,7 +304,7 @@ def get_genie_response(prompt: str) -> str:
             )
             result_resp = session.get(result_url, headers=headers)
             if result_resp.status_code != 200:
-                return header + f"Failed to retrieve query results: {result_resp.status_code} - {result_resp.text}"
+                return {"text": header + f"Failed to retrieve query results: {result_resp.status_code} - {result_resp.text}", "chart_bytes": None}
 
             result_json = result_resp.json()
             statement_response = result_json.get("statement_response") or {}
@@ -173,23 +316,37 @@ def get_genie_response(prompt: str) -> str:
             cols = [((c or {}).get("name") or "") for c in cols_info]
 
             if not cols or not rows:
-                return header + "_No data returned._"
+                return {"text": header + "_No data returned._", "chart_bytes": None}
 
-            # Teams renders code blocks fine; tabulate output is readable in monospace
-            table = tabulate(rows, headers=[c.upper() for c in cols], tablefmt="fancy_grid")
-            return header + f"```text\n{table}\n```"
+            table_md = _format_markdown_table([c.upper() for c in cols], rows)
+            chart_bytes = _generate_chart_png(cols, rows, description)
+            return {"text": header + "\n\n" + table_md, "chart_bytes": chart_bytes}
 
         # Fallback: show raw attachment keys
-        return f"Genie returned an unsupported attachment shape. Keys: {list(first.keys())}"
+        return {"text": f"Genie returned an unsupported attachment shape. Keys: {list(first.keys())}", "chart_bytes": None}
 
-    return "Genie response not completed in time (timeout)."
+    return {"text": "Genie response not completed in time (timeout).", "chart_bytes": None}
 
 
 class TeamsGenieBot(ActivityHandler):
     async def on_message_activity(self, turn_context: TurnContext):
         user_input = (turn_context.activity.text or "").strip()
-        reply_text = get_genie_response(user_input)
-        await turn_context.send_activity(Activity(type=ActivityTypes.message, text=reply_text))
+        result = get_genie_response(user_input)
+        if isinstance(result, str):
+            result = {"text": result, "chart_bytes": None}
+        reply_text = result.get("text") or "No response."
+        chart_bytes = result.get("chart_bytes")
+        attachments = []
+        if chart_bytes:
+            base_url = (os.environ.get("BOT_PUBLIC_URL") or "").strip().rstrip("/")
+            if base_url:
+                cid = _chart_store(chart_bytes)
+                chart_url = f"{base_url}/api/chart/{cid}"
+                attachments.append(Attachment(content_type="image/png", content_url=chart_url, name="chart.png"))
+        activity = Activity(type=ActivityTypes.message, text=reply_text)
+        if attachments:
+            activity.attachments = attachments
+        await turn_context.send_activity(activity)
 
     async def on_members_added_activity(self, members_added, turn_context: TurnContext):
         for member in members_added:
@@ -204,9 +361,62 @@ MICROSOFT_APP_PASSWORD = (os.environ.get("MICROSOFT_APP_PASSWORD") or "").strip(
 # Required for single-tenant app: SDK must request token from your tenant, not "Bot Framework"
 MICROSOFT_APP_TENANT_ID = (os.environ.get("MICROSOFT_APP_TENANT_ID") or "").strip()
 
+
+def _make_bot_credentials():
+    """Build credentials for the adapter. Uses direct tenant token URL when tenant is set to avoid authority-config errors."""
+    if not MICROSOFT_APP_TENANT_ID or AppCredentials is None:
+        return None
+    # Custom credential that POSTs directly to tenant token endpoint (no OpenID discovery)
+    token_url = f"https://login.microsoftonline.com/{MICROSOFT_APP_TENANT_ID}/oauth2/v2.0/token"
+    scope = "https://api.botframework.com/.default"
+    app_id = MICROSOFT_APP_ID
+    app_password = MICROSOFT_APP_PASSWORD
+
+    class _SingleTenantBotCredentials(AppCredentials):
+        _lock = threading.Lock()
+        _cached_token: str | None = None
+        _cached_expiry: float = 0
+        _TOKEN_LIFETIME_SEC = 3000  # refresh a bit before 1h
+
+        def __init__(self):
+            # Base expects (app_id, channel_auth_tenant=None, oauth_scope=None)
+            super().__init__(app_id, MICROSOFT_APP_TENANT_ID, scope)
+
+        def get_access_token(self, force_refresh: bool = False) -> str:
+            with _SingleTenantBotCredentials._lock:
+                now = time.time()
+                if not force_refresh and _SingleTenantBotCredentials._cached_token and _SingleTenantBotCredentials._cached_expiry > now:
+                    return _SingleTenantBotCredentials._cached_token
+            body = (
+                "grant_type=client_credentials"
+                f"&client_id={quote(app_id, safe='')}"
+                f"&client_secret={quote(app_password, safe='')}"
+                f"&scope={quote(scope, safe='')}"
+            )
+            resp = requests.post(
+                token_url,
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data["access_token"]
+            expires_in = int(data.get("expires_in", 3600))
+            with _SingleTenantBotCredentials._lock:
+                _SingleTenantBotCredentials._cached_token = token
+                _SingleTenantBotCredentials._cached_expiry = time.time() + min(expires_in, _SingleTenantBotCredentials._TOKEN_LIFETIME_SEC)
+            return token
+
+    return _SingleTenantBotCredentials()
+
+
 _adapter_kw: dict = {}
 if MICROSOFT_APP_TENANT_ID:
     _adapter_kw["channel_auth_tenant"] = MICROSOFT_APP_TENANT_ID
+_custom_creds = _make_bot_credentials()
+if _custom_creds is not None:
+    _adapter_kw["app_credentials"] = _custom_creds
 adapter_settings = BotFrameworkAdapterSettings(MICROSOFT_APP_ID, MICROSOFT_APP_PASSWORD, **_adapter_kw)
 adapter = BotFrameworkAdapter(adapter_settings)
 bot = TeamsGenieBot()
@@ -233,6 +443,15 @@ async def messages(req: web.Request) -> web.Response:
 async def health(_req: web.Request) -> web.Response:
     """GET / for health checks and to avoid 404 when opening the root URL."""
     return web.Response(text="Bot is running. POST to /api/messages for the Teams webhook.", status=200)
+
+
+async def chart_image(req: web.Request) -> web.Response:
+    """GET /api/chart/<id> returns a previously stored chart PNG (for Teams attachment contentUrl)."""
+    cid = req.match_info.get("id") or ""
+    data = _chart_get(cid)
+    if data is None:
+        return web.Response(status=404, text="Chart not found or expired.")
+    return web.Response(body=data, content_type="image/png")
 
 
 def _cors_headers() -> dict:
@@ -267,6 +486,7 @@ def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_middleware, log_all_requests])
     app.router.add_get("/", health)
     app.router.add_post("/api/messages", messages)
+    app.router.add_get("/api/chart/{id}", chart_image)
     return app
 
 

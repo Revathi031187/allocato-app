@@ -1,0 +1,43 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
+  "version": "1.0.0",
+  "manifestVersion": "1.25",
+  "supportsChannelFeatures": "tier1",
+  "id": "20c32e79-1f12-42a2-ae44-128ee77dd757",
+  "name": {
+    "short": "Teams Genie Assistant"
+  },
+  "developer": {
+    "name": "Latentview analytics",
+    "websiteUrl": "https://www.latentview.com",
+    "privacyUrl": "https://www.latentview.com/privacy-policy",
+    "termsOfUseUrl": "https://www.latentview.com/terms-of-use"
+  },
+  "description": {
+    "short": "Ask questions about your data in natural language. Powered by Databricks Genie.",
+    "full": "Databricks Genie Assistant lets you ask questions about your organization's data in plain English directly in Microsoft Teams. You get instant answers, SQL, and tables—no need to leave Teams or open Databricks.\nHow it works:\n• Ask questions in chat (e.g. \"Top 5 categories by revenue\", \"Summarize sales by region\").\n• The bot queries Databricks Genie and returns answers, generated SQL, and result tables (and charts when available).\n• Use it in 1:1 chat or add it to a team or group chat."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#ffffff",
+  "bots": [
+    {
+      "botId": "c227e509-5774-44e1-b76b-12669d5914fc",
+      "scopes": [
+        "personal",
+        "team",
+        "groupChat"
+      ],
+      "isNotificationOnly": false,
+      "supportsCalling": false,
+      "supportsVideo": false,
+      "supportsFiles": true
+    }
+  ],
+  "validDomains": [],
+  "webApplicationInfo": {
+    "id": "c227e509-5774-44e1-b76b-12669d5914fc"
+  }
+}

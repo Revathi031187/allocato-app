@@ -2,6 +2,6 @@ aiohttp
 botbuilder-core
 botbuilder-schema
 databricks-sdk
+matplotlib>=3.5.0
 python-dotenv
 requests
-tabulate

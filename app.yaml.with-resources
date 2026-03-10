@@ -1,0 +1,15 @@
+# Use this file when you have added the 3 App resources in the Databricks UI.
+# Rename to app.yaml (replace the current app.yaml) then redeploy.
+#
+# Required resources (in Apps → your app → Add resource):
+#   - Genie space, key: genie-space
+#   - Secret, key: microsoft-app-id
+#   - Secret, key: microsoft-app-password
+command: ['python', 'app.py']
+env:
+  - name: GENIE_SPACE_ID
+    valueFrom: genie-space
+  - name: MICROSOFT_APP_ID
+    valueFrom: microsoft-app-id
+  - name: MICROSOFT_APP_PASSWORD
+    valueFrom: microsoft-app-password
